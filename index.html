@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>给你的海色心意</title>
+    <link rel="stylesheet" href="./styles/main.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <div class="sri-lanka-gradient" aria-hidden="true"></div>
+      <div class="ambient-glow" aria-hidden="true"></div>
+      <div class="shore-light-streaks" aria-hidden="true"></div>
+      <div class="rain-mist" aria-hidden="true"></div>
+      <div class="rain-lines" aria-hidden="true"></div>
+      <div class="ocean-particles" id="oceanParticles" aria-hidden="true"></div>
+
+      <section class="scene-panel" id="scenePanel" aria-live="polite">
+        <img class="scene-hero" id="sceneHero" alt="斯里兰卡海岸" loading="eager" decoding="async" />
+        <p class="scene-text" id="sceneText"></p>
+        <div class="choices" id="choices"></div>
+      </section>
+
+      <small class="music-credit">音乐：海艺晨原创保护</small>
+    </main>
+
+    <script src="./scripts/scenes.js"></script>
+    <script src="./scripts/audio.js"></script>
+    <script src="./scripts/app.js"></script>
+  </body>
+</html>

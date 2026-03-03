@@ -1,0 +1,246 @@
+(() => {
+  const story = window.STORY_SCENES;
+  if (!story) {
+    console.error("未找到剧情配置 STORY_SCENES");
+    return;
+  }
+
+  const appShell = document.querySelector(".app-shell");
+  const scenePanel = document.getElementById("scenePanel");
+  const sceneHero = document.getElementById("sceneHero");
+  const sceneText = document.getElementById("sceneText");
+  const choicesBox = document.getElementById("choices");
+  const particlesRoot = document.getElementById("oceanParticles");
+
+  const audioController =
+    typeof window.createAudioController === "function"
+      ? window.createAudioController("assets/bgm.m4a")
+      : { startFadeIn: () => undefined };
+
+  const FADE_OUT_MS = 220;
+  const FADE_IN_MS = 260;
+
+  let currentSceneId = story.initialSceneId;
+  let isTransitioning = false;
+
+  const THEME_CONFIG = {
+    default: {
+      className: "theme-default",
+      particleShape: "orb",
+      particleCount: 42,
+      particleMin: 10,
+      particleMax: 26,
+      durationMin: 8,
+      durationRange: 8
+    },
+    shore: {
+      className: "theme-shore",
+      particleShape: "orb",
+      particleCount: 58,
+      particleMin: 16,
+      particleMax: 42,
+      durationMin: 9,
+      durationRange: 7
+    },
+    rain: {
+      className: "theme-rain",
+      particleShape: "rain",
+      particleCount: 82,
+      particleMin: 2,
+      particleMax: 5,
+      durationMin: 2.2,
+      durationRange: 1.6
+    }
+  };
+
+  let currentThemeKey = "default";
+
+  const getScene = (sceneId) => story.sceneMap[sceneId];
+
+  const setButtonsDisabled = (disabled) => {
+    const buttons = choicesBox.querySelectorAll("button");
+    buttons.forEach((button) => {
+      button.disabled = disabled;
+    });
+  };
+
+  const runAudioCue = (cue) => {
+    if (cue === "startFadeIn") {
+      audioController.startFadeIn({ duration: 9000, targetVolume: 0.4 });
+    }
+  };
+
+  const clearThemeClasses = () => {
+    if (!appShell) {
+      return;
+    }
+
+    Object.values(THEME_CONFIG).forEach((config) => {
+      appShell.classList.remove(config.className);
+    });
+  };
+
+  const applyTheme = (themeKey = "default") => {
+    const validThemeKey = THEME_CONFIG[themeKey] ? themeKey : "default";
+    currentThemeKey = validThemeKey;
+
+    clearThemeClasses();
+    if (appShell) {
+      appShell.classList.add(THEME_CONFIG[validThemeKey].className);
+    }
+
+    initOceanParticles();
+  };
+
+  const createParticle = (theme) => {
+    const dot = document.createElement("span");
+    const left = Math.random() * 100;
+    const duration = theme.durationMin + Math.random() * theme.durationRange;
+    const delay = -Math.random() * duration;
+    const driftX = (Math.random() - 0.5) * 20;
+
+    if (theme.particleShape === "rain") {
+      const width = theme.particleMin + Math.random() * (theme.particleMax - theme.particleMin);
+      const height = 16 + Math.random() * 28;
+      dot.style.width = `${width}px`;
+      dot.style.height = `${height}px`;
+    } else {
+      const size = theme.particleMin + Math.random() * (theme.particleMax - theme.particleMin);
+      dot.style.width = `${size}px`;
+      dot.style.height = `${size}px`;
+    }
+
+    dot.style.left = `${left}%`;
+    dot.style.animationDuration = `${duration}s`;
+    dot.style.animationDelay = `${delay}s`;
+    dot.style.setProperty("--drift-x", `${driftX}px`);
+
+    return dot;
+  };
+
+  const initOceanParticles = () => {
+    if (!particlesRoot) {
+      return;
+    }
+
+    const theme = THEME_CONFIG[currentThemeKey] || THEME_CONFIG.default;
+    const particleCount = theme.particleCount;
+    const fragment = document.createDocumentFragment();
+
+    particlesRoot.innerHTML = "";
+
+    for (let i = 0; i < particleCount; i += 1) {
+      fragment.appendChild(createParticle(theme));
+    }
+
+    particlesRoot.appendChild(fragment);
+  };
+
+  const renderHero = (scene) => {
+    if (!sceneHero) {
+      return;
+    }
+
+    if (scene.heroImage) {
+      sceneHero.src = scene.heroImage;
+      sceneHero.alt = scene.heroAlt || "场景图片";
+      sceneHero.classList.add("is-visible");
+      return;
+    }
+
+    sceneHero.classList.remove("is-visible");
+    sceneHero.removeAttribute("src");
+    sceneHero.alt = "";
+  };
+
+  const getChoicesForScene = (scene) => {
+    if (Array.isArray(scene.choices) && scene.choices.length > 0) {
+      return scene.choices;
+    }
+
+    if (scene.next) {
+      return [
+        {
+          label: scene.choiceLabel || "继续",
+          next: scene.next,
+          audioCue: scene.audioCue || null
+        }
+      ];
+    }
+
+    return [];
+  };
+
+  const renderChoices = (scene) => {
+    choicesBox.innerHTML = "";
+    const choices = getChoicesForScene(scene);
+
+    choices.forEach((choice) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "choice-btn";
+      button.textContent = choice.label;
+
+      button.addEventListener("click", () => {
+        if (isTransitioning) {
+          return;
+        }
+
+        if (!choice.next) {
+          return;
+        }
+
+        isTransitioning = true;
+        setButtonsDisabled(true);
+        runAudioCue(choice.audioCue || scene.audioCue);
+        switchScene(choice.next);
+      });
+
+      choicesBox.appendChild(button);
+    });
+  };
+
+  const switchScene = (nextSceneId) => {
+    const nextScene = getScene(nextSceneId);
+    if (!nextScene) {
+      console.error(`找不到场景：${nextSceneId}`);
+      isTransitioning = false;
+      setButtonsDisabled(false);
+      return;
+    }
+
+    scenePanel.classList.add("is-fading-out");
+
+    window.setTimeout(() => {
+      currentSceneId = nextSceneId;
+      applyTheme(nextScene.theme || "default");
+      renderHero(nextScene);
+      sceneText.textContent = nextScene.text;
+      renderChoices(nextScene);
+
+      scenePanel.classList.remove("is-fading-out");
+      scenePanel.classList.add("is-fading-in");
+
+      window.setTimeout(() => {
+        scenePanel.classList.remove("is-fading-in");
+        isTransitioning = false;
+        setButtonsDisabled(false);
+      }, FADE_IN_MS);
+    }, FADE_OUT_MS);
+  };
+
+  const init = () => {
+    const firstScene = getScene(currentSceneId);
+    if (!firstScene) {
+      console.error(`初始场景不存在：${currentSceneId}`);
+      return;
+    }
+
+    applyTheme(firstScene.theme || "default");
+    renderHero(firstScene);
+    sceneText.textContent = firstScene.text;
+    renderChoices(firstScene);
+  };
+
+  init();
+})();
