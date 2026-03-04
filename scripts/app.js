@@ -66,6 +66,11 @@
   };
 
   let currentThemeKey = "default";
+  let torchStream = null;
+  let torchTrack = null;
+  let torchTimerId = null;
+  let torchUnavailable = false;
+  let torchRequestInFlight = false;
 
   const getScene = (sceneId) => story.sceneMap[sceneId];
 
@@ -80,6 +85,224 @@
     if (cue === "startFadeIn") {
       audioController.startFadeIn({ duration: 9000, targetVolume: 0.4 });
     }
+  };
+
+  const TORCH_VIDEO_ATTEMPTS = [
+    { facingMode: { exact: "environment" } },
+    { facingMode: { ideal: "environment" } },
+    { facingMode: "environment" },
+    true
+  ];
+
+  const getTorchCapabilities = (track) => {
+    if (!track || typeof track.getCapabilities !== "function") {
+      return null;
+    }
+
+    try {
+      return track.getCapabilities();
+    } catch (error) {
+      return null;
+    }
+  };
+
+  const tryEnableTorchOnTrack = async (track) => {
+    if (!track || typeof track.applyConstraints !== "function") {
+      return false;
+    }
+
+    const capabilities = getTorchCapabilities(track);
+    if (capabilities && !capabilities.torch) {
+      return false;
+    }
+
+    const attempts = [
+      { advanced: [{ torch: true }] },
+      { advanced: [{ torch: true, focusMode: "continuous" }] },
+      { advanced: [{ torch: true, exposureMode: "continuous" }] }
+    ];
+
+    for (const constraints of attempts) {
+      try {
+        await track.applyConstraints(constraints);
+        return true;
+      } catch (error) {
+        // try next pattern
+      }
+    }
+
+    return false;
+  };
+
+  const openCameraTrack = async (videoConfig) => {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: videoConfig, audio: false });
+    const [track] = stream.getVideoTracks();
+
+    if (!track) {
+      stream.getTracks().forEach((item) => item.stop());
+      return null;
+    }
+
+    return { stream, track };
+  };
+
+  const clearTorchTimer = () => {
+    if (!torchTimerId) {
+      return;
+    }
+
+    clearTimeout(torchTimerId);
+    torchTimerId = null;
+  };
+
+  const releaseTorchStream = () => {
+    if (torchTrack) {
+      torchTrack.stop();
+      torchTrack = null;
+    }
+
+    if (torchStream) {
+      torchStream.getTracks().forEach((item) => item.stop());
+      torchStream = null;
+    }
+  };
+
+  const enableTorch = async () => {
+    if (torchUnavailable || torchRequestInFlight) {
+      return;
+    }
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      torchUnavailable = true;
+      return;
+    }
+
+    torchRequestInFlight = true;
+    try {
+      if (torchTrack) {
+        const enabledOnExistingTrack = await tryEnableTorchOnTrack(torchTrack);
+        if (enabledOnExistingTrack) {
+          return;
+        }
+
+        releaseTorchStream();
+      }
+
+      for (const videoConfig of TORCH_VIDEO_ATTEMPTS) {
+        let opened = null;
+
+        try {
+          opened = await openCameraTrack(videoConfig);
+        } catch (error) {
+          continue;
+        }
+
+        if (!opened) {
+          continue;
+        }
+
+        const { stream, track } = opened;
+        const enabled = await tryEnableTorchOnTrack(track);
+
+        if (enabled) {
+          torchStream = stream;
+          torchTrack = track;
+          return;
+        }
+
+        track.stop();
+        stream.getTracks().forEach((item) => item.stop());
+      }
+
+      torchUnavailable = true;
+      console.warn("设备不支持手电筒约束");
+    } finally {
+      torchRequestInFlight = false;
+    }
+  };
+
+  const warmupTorchPermission = async () => {
+    if (torchUnavailable || torchTrack || torchRequestInFlight) {
+      return;
+    }
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      torchUnavailable = true;
+      return;
+    }
+
+    torchRequestInFlight = true;
+    try {
+      for (const videoConfig of TORCH_VIDEO_ATTEMPTS) {
+        let opened = null;
+
+        try {
+          opened = await openCameraTrack(videoConfig);
+        } catch (error) {
+          continue;
+        }
+
+        if (!opened) {
+          continue;
+        }
+
+        const { stream, track } = opened;
+        const capabilities = getTorchCapabilities(track);
+
+        if (capabilities && capabilities.torch === false) {
+          track.stop();
+          stream.getTracks().forEach((item) => item.stop());
+          continue;
+        }
+
+        torchStream = stream;
+        torchTrack = track;
+        return;
+      }
+
+      console.warn("预热未拿到可用后置摄像头轨道，将在最终阶段重试");
+    } finally {
+      torchRequestInFlight = false;
+    }
+  };
+
+  const disableTorch = async () => {
+    if (!torchTrack) {
+      return;
+    }
+
+    try {
+      await torchTrack.applyConstraints({ advanced: [{ torch: false }] });
+    } catch (error) {
+      console.warn("手电筒关闭失败：", error);
+    }
+
+    torchTrack.stop();
+    if (torchStream) {
+      torchStream.getTracks().forEach((item) => item.stop());
+    }
+
+    torchTrack = null;
+    torchStream = null;
+  };
+
+  const runTorchCue = (cue) => {
+    if (cue === "lightAfter2s") {
+      clearTorchTimer();
+      torchTimerId = window.setTimeout(() => {
+        enableTorch();
+        torchTimerId = null;
+      }, 2000);
+      return;
+    }
+
+    if (cue === "warmup") {
+      warmupTorchPermission();
+      return;
+    }
+
+    clearTorchTimer();
+    disableTorch();
   };
 
   const clearThemeClasses = () => {
@@ -205,6 +428,12 @@
         isTransitioning = true;
         setButtonsDisabled(true);
         runAudioCue(choice.audioCue || scene.audioCue);
+
+        const upcomingScene = getScene(choice.next);
+        if (upcomingScene && upcomingScene.torchCue === "warmup") {
+          runTorchCue("warmup");
+        }
+
         switchScene(choice.next);
       });
 
@@ -226,6 +455,7 @@
     window.setTimeout(() => {
       currentSceneId = nextSceneId;
       applyTheme(nextScene.theme || "default");
+      runTorchCue(nextScene.torchCue || null);
       renderHero(nextScene);
       sceneText.textContent = nextScene.text;
       renderChoices(nextScene);
@@ -249,6 +479,7 @@
     }
 
     applyTheme(firstScene.theme || "default");
+    runTorchCue(firstScene.torchCue || null);
     renderHero(firstScene);
     sceneText.textContent = firstScene.text;
     renderChoices(firstScene);
