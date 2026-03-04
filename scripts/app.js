@@ -71,6 +71,7 @@
   let torchTimerId = null;
   let torchUnavailable = false;
   let torchRequestInFlight = false;
+  let imageCaptureController = null;
 
   const getScene = (sceneId) => story.sceneMap[sceneId];
 
@@ -103,6 +104,22 @@
       return track.getCapabilities();
     } catch (error) {
       return null;
+    }
+  };
+
+  const tryEnableTorchWithImageCapture = async (track) => {
+    if (typeof window.ImageCapture !== "function") {
+      return false;
+    }
+
+    try {
+      const controller = new window.ImageCapture(track);
+      await controller.getPhotoCapabilities();
+      await controller.setOptions({ fillLightMode: "flash" });
+      imageCaptureController = controller;
+      return true;
+    } catch (error) {
+      return false;
     }
   };
 
@@ -165,6 +182,8 @@
       torchStream.getTracks().forEach((item) => item.stop());
       torchStream = null;
     }
+
+    imageCaptureController = null;
   };
 
   const enableTorch = async () => {
@@ -180,7 +199,10 @@
     torchRequestInFlight = true;
     try {
       if (torchTrack) {
-        const enabledOnExistingTrack = await tryEnableTorchOnTrack(torchTrack);
+        const enabledOnExistingTrack =
+          (await tryEnableTorchOnTrack(torchTrack)) ||
+          (await tryEnableTorchWithImageCapture(torchTrack));
+
         if (enabledOnExistingTrack) {
           return;
         }
@@ -202,7 +224,9 @@
         }
 
         const { stream, track } = opened;
-        const enabled = await tryEnableTorchOnTrack(track);
+        const enabled =
+          (await tryEnableTorchOnTrack(track)) ||
+          (await tryEnableTorchWithImageCapture(track));
 
         if (enabled) {
           torchStream = stream;
@@ -249,7 +273,7 @@
         const { stream, track } = opened;
         const capabilities = getTorchCapabilities(track);
 
-        if (capabilities && capabilities.torch === false) {
+        if (capabilities && capabilities.torch === false && typeof window.ImageCapture !== "function") {
           track.stop();
           stream.getTracks().forEach((item) => item.stop());
           continue;
