@@ -69,9 +69,13 @@
   let torchStream = null;
   let torchTrack = null;
   let torchTimerId = null;
+  let torchRetryTimerId = null;
   let torchUnavailable = false;
   let torchRequestInFlight = false;
   let imageCaptureController = null;
+  let rearCameraDeviceId = "";
+  let torchPreviewVideo = null;
+  let systemCameraInput = null;
 
   const getScene = (sceneId) => story.sceneMap[sceneId];
 
@@ -94,6 +98,175 @@
     { facingMode: "environment" },
     true
   ];
+
+  const REAR_CAMERA_LABEL_RE = /(rear|back|environment|后|广角|主摄|wide|camera 0|cam0)/i;
+  const FRONT_CAMERA_LABEL_RE = /(front|user|前|selfie)/i;
+
+  const ensureTorchPreviewVideo = () => {
+    if (torchPreviewVideo) {
+      return torchPreviewVideo;
+    }
+
+    const video = document.createElement("video");
+    video.setAttribute("playsinline", "true");
+    video.muted = true;
+    video.autoplay = true;
+    video.style.position = "fixed";
+    video.style.width = "1px";
+    video.style.height = "1px";
+    video.style.opacity = "0";
+    video.style.pointerEvents = "none";
+    video.style.left = "-9999px";
+    video.style.top = "0";
+    document.body.appendChild(video);
+    torchPreviewVideo = video;
+    return video;
+  };
+
+  const attachPreviewStream = async (stream) => {
+    if (!stream) {
+      return;
+    }
+
+    const video = ensureTorchPreviewVideo();
+    if (video.srcObject !== stream) {
+      video.srcObject = stream;
+    }
+
+    try {
+      await video.play();
+    } catch (error) {
+      // some browsers reject hidden autoplay, torch may still work
+    }
+  };
+
+  const detachPreviewStream = () => {
+    if (!torchPreviewVideo) {
+      return;
+    }
+
+    try {
+      torchPreviewVideo.pause();
+    } catch (error) {
+      // ignore pause failures
+    }
+
+    torchPreviewVideo.srcObject = null;
+  };
+
+  const openSystemCamera = () => {
+    if (!systemCameraInput) {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/*";
+      input.setAttribute("capture", "environment");
+      input.style.position = "fixed";
+      input.style.left = "-9999px";
+      input.style.top = "0";
+      document.body.appendChild(input);
+      systemCameraInput = input;
+    }
+
+    systemCameraInput.value = "";
+    systemCameraInput.click();
+  };
+
+  const cacheRearCameraDeviceIdFromTrack = (track) => {
+    if (!track || typeof track.getSettings !== "function") {
+      return;
+    }
+
+    const settings = track.getSettings();
+    if (settings && settings.deviceId) {
+      rearCameraDeviceId = settings.deviceId;
+    }
+  };
+
+  const isLikelyFrontTrack = (track) => {
+    if (!track) {
+      return false;
+    }
+
+    const label = track.label || "";
+    if (label && FRONT_CAMERA_LABEL_RE.test(label) && !REAR_CAMERA_LABEL_RE.test(label)) {
+      return true;
+    }
+
+    if (typeof track.getSettings === "function") {
+      const settings = track.getSettings();
+      if (settings && settings.facingMode === "user") {
+        return true;
+      }
+    }
+
+    return false;
+  };
+
+  const refreshRearCameraDeviceId = async () => {
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== "function") {
+      return rearCameraDeviceId;
+    }
+
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = devices.filter((device) => device.kind === "videoinput");
+      if (videoInputs.length === 0) {
+        return rearCameraDeviceId;
+      }
+
+      let bestDevice = null;
+      let bestScore = -Infinity;
+
+      videoInputs.forEach((device, index) => {
+        const label = device.label || "";
+        let score = 0;
+
+        if (label) {
+          if (REAR_CAMERA_LABEL_RE.test(label)) {
+            score += 4;
+          }
+
+          if (FRONT_CAMERA_LABEL_RE.test(label)) {
+            score -= 4;
+          }
+
+          if (/wide|主摄|后置|back camera|camera 0|cam0/i.test(label)) {
+            score += 1;
+          }
+        }
+
+        score += Math.max(0, 3 - index * 0.3);
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestDevice = device;
+        }
+      });
+
+      if (bestDevice && bestDevice.deviceId) {
+        rearCameraDeviceId = bestDevice.deviceId;
+      }
+    } catch (error) {
+      // ignore enumerate failures
+    }
+
+    return rearCameraDeviceId;
+  };
+
+  const buildTorchVideoAttempts = () => {
+    const attempts = [];
+
+    if (rearCameraDeviceId) {
+      attempts.push({ deviceId: { exact: rearCameraDeviceId } });
+      attempts.push({
+        deviceId: { exact: rearCameraDeviceId },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 }
+      });
+    }
+
+    return attempts.concat(TORCH_VIDEO_ATTEMPTS);
+  };
 
   const getTorchCapabilities = (track) => {
     if (!track || typeof track.getCapabilities !== "function") {
@@ -151,7 +324,28 @@
     return false;
   };
 
-  const openCameraTrack = async (videoConfig) => {
+  const stopOpenedCapture = (opened) => {
+    if (!opened) {
+      return;
+    }
+
+    const { stream, track } = opened;
+
+    if (track) {
+      track.stop();
+    }
+
+    if (stream) {
+      if (torchPreviewVideo && torchPreviewVideo.srcObject === stream) {
+        detachPreviewStream();
+      }
+
+      stream.getTracks().forEach((item) => item.stop());
+    }
+  };
+
+  const openCameraTrack = async (videoConfig, options = {}) => {
+    const { requireRear = false } = options;
     const stream = await navigator.mediaDevices.getUserMedia({ video: videoConfig, audio: false });
     const [track] = stream.getVideoTracks();
 
@@ -160,16 +354,27 @@
       return null;
     }
 
+    if (requireRear && isLikelyFrontTrack(track)) {
+      stream.getTracks().forEach((item) => item.stop());
+      return null;
+    }
+
+    cacheRearCameraDeviceIdFromTrack(track);
+    await attachPreviewStream(stream);
+
     return { stream, track };
   };
 
   const clearTorchTimer = () => {
-    if (!torchTimerId) {
-      return;
+    if (torchTimerId) {
+      clearTimeout(torchTimerId);
+      torchTimerId = null;
     }
 
-    clearTimeout(torchTimerId);
-    torchTimerId = null;
+    if (torchRetryTimerId) {
+      clearTimeout(torchRetryTimerId);
+      torchRetryTimerId = null;
+    }
   };
 
   const releaseTorchStream = () => {
@@ -179,42 +384,60 @@
     }
 
     if (torchStream) {
+      if (torchPreviewVideo && torchPreviewVideo.srcObject === torchStream) {
+        detachPreviewStream();
+      }
+
       torchStream.getTracks().forEach((item) => item.stop());
       torchStream = null;
+    } else {
+      detachPreviewStream();
     }
 
     imageCaptureController = null;
   };
 
-  const enableTorch = async () => {
+  const enableTorch = async (options = {}) => {
+    const { forceRefresh = false } = options;
+
     if (torchUnavailable || torchRequestInFlight) {
-      return;
+      return false;
     }
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       torchUnavailable = true;
-      return;
+      return false;
     }
 
     torchRequestInFlight = true;
     try {
-      if (torchTrack) {
+      if (forceRefresh) {
+        releaseTorchStream();
+      }
+
+      await refreshRearCameraDeviceId();
+
+      if (torchTrack && !forceRefresh) {
+        cacheRearCameraDeviceIdFromTrack(torchTrack);
+
         const enabledOnExistingTrack =
           (await tryEnableTorchOnTrack(torchTrack)) ||
           (await tryEnableTorchWithImageCapture(torchTrack));
 
         if (enabledOnExistingTrack) {
-          return;
+          return true;
         }
 
         releaseTorchStream();
       }
 
-      for (const videoConfig of TORCH_VIDEO_ATTEMPTS) {
+      const cameraAttempts = buildTorchVideoAttempts();
+
+      for (const videoConfig of cameraAttempts) {
         let opened = null;
 
         try {
-          opened = await openCameraTrack(videoConfig);
+          opened = await openCameraTrack(videoConfig, { requireRear: true });
         } catch (error) {
           continue;
         }
@@ -231,15 +454,16 @@
         if (enabled) {
           torchStream = stream;
           torchTrack = track;
-          return;
+          torchUnavailable = false;
+          return true;
         }
 
-        track.stop();
-        stream.getTracks().forEach((item) => item.stop());
+        stopOpenedCapture(opened);
       }
 
       torchUnavailable = true;
       console.warn("设备不支持手电筒约束");
+      return false;
     } finally {
       torchRequestInFlight = false;
     }
@@ -257,11 +481,15 @@
 
     torchRequestInFlight = true;
     try {
-      for (const videoConfig of TORCH_VIDEO_ATTEMPTS) {
+      await refreshRearCameraDeviceId();
+
+      const cameraAttempts = buildTorchVideoAttempts();
+
+      for (const videoConfig of cameraAttempts) {
         let opened = null;
 
         try {
-          opened = await openCameraTrack(videoConfig);
+          opened = await openCameraTrack(videoConfig, { requireRear: true });
         } catch (error) {
           continue;
         }
@@ -274,13 +502,13 @@
         const capabilities = getTorchCapabilities(track);
 
         if (capabilities && capabilities.torch === false && typeof window.ImageCapture !== "function") {
-          track.stop();
-          stream.getTracks().forEach((item) => item.stop());
+          stopOpenedCapture(opened);
           continue;
         }
 
         torchStream = stream;
         torchTrack = track;
+        torchUnavailable = false;
         return;
       }
 
@@ -292,6 +520,7 @@
 
   const disableTorch = async () => {
     if (!torchTrack) {
+      releaseTorchStream();
       return;
     }
 
@@ -301,20 +530,25 @@
       console.warn("手电筒关闭失败：", error);
     }
 
-    torchTrack.stop();
-    if (torchStream) {
-      torchStream.getTracks().forEach((item) => item.stop());
-    }
-
-    torchTrack = null;
-    torchStream = null;
+    releaseTorchStream();
   };
 
   const runTorchCue = (cue) => {
     if (cue === "lightAfter2s") {
       clearTorchTimer();
       torchTimerId = window.setTimeout(() => {
-        enableTorch();
+        enableTorch({ forceRefresh: true }).then((enabled) => {
+          if (enabled) {
+            return;
+          }
+
+          torchUnavailable = false;
+          torchRetryTimerId = window.setTimeout(() => {
+            enableTorch({ forceRefresh: true });
+            torchRetryTimerId = null;
+          }, 900);
+        });
+
         torchTimerId = null;
       }, 2000);
       return;
@@ -430,6 +664,15 @@
     return [];
   };
 
+  const handleChoiceAction = (choice) => {
+    if (choice.cameraAction === "openSystemCamera") {
+      openSystemCamera();
+      return true;
+    }
+
+    return false;
+  };
+
   const renderChoices = (scene) => {
     choicesBox.innerHTML = "";
     const choices = getChoicesForScene(scene);
@@ -442,6 +685,10 @@
 
       button.addEventListener("click", () => {
         if (isTransitioning) {
+          return;
+        }
+
+        if (handleChoiceAction(choice)) {
           return;
         }
 
@@ -508,6 +755,11 @@
     sceneText.textContent = firstScene.text;
     renderChoices(firstScene);
   };
+
+  window.addEventListener("beforeunload", () => {
+    clearTorchTimer();
+    releaseTorchStream();
+  });
 
   init();
 })();

@@ -78,16 +78,13 @@
       next: "s11",
       theme: "shore",
       heroImage: "assets/sri-lanka-coast.png",
-      heroAlt: "斯里兰卡海岸",
-      torchCue: "warmup"
+      heroAlt: "斯里兰卡海岸"
     },
     {
       id: "s11",
       text: "真相在这块屏幕的下方。\n你去探索吧。",
-      choiceLabel: "再听一遍",
-      next: "s1",
-      theme: "default",
-      torchCue: "lightAfter2s"
+      choices: [{ label: "再听一遍", cameraAction: "openSystemCamera" }],
+      theme: "default"
     }
   ];
 
