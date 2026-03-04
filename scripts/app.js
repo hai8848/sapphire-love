@@ -12,9 +12,21 @@
   const choicesBox = document.getElementById("choices");
   const particlesRoot = document.getElementById("oceanParticles");
 
+  const resolveAssetUrl = (assetPath) => {
+    const normalized = assetPath.replace(/^\.?\//, "");
+
+    if (window.location.hostname.endsWith("github.io")) {
+      const pathParts = window.location.pathname.split("/").filter(Boolean);
+      const repoName = pathParts[0] || "";
+      return repoName ? `/${repoName}/${normalized}` : `/${normalized}`;
+    }
+
+    return `./${normalized}`;
+  };
+
   const audioController =
     typeof window.createAudioController === "function"
-      ? window.createAudioController("assets/bgm.m4a")
+      ? window.createAudioController(resolveAssetUrl("assets/bgm.m4a"))
       : { startFadeIn: () => undefined };
 
   const FADE_OUT_MS = 220;
@@ -142,7 +154,7 @@
     }
 
     if (scene.heroImage) {
-      sceneHero.src = scene.heroImage;
+      sceneHero.src = resolveAssetUrl(scene.heroImage);
       sceneHero.alt = scene.heroAlt || "场景图片";
       sceneHero.classList.add("is-visible");
       return;
