@@ -82,7 +82,7 @@
     },
     {
       id: "s11",
-      text: "真相在这块屏幕的下方。\n你去探索吧。",
+      text: "真相在这块屏幕的下方。\n点开摄像机，去探秘吧。",
       choices: [{ label: "再听一遍", cameraAction: "openSystemCamera" }],
       theme: "default"
     }
